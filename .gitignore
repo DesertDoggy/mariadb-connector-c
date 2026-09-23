@@ -15,20 +15,11 @@ mariadb_config/libmariadb.pc
 # Keep empty directories: >> .gitignore/.git*
 
 # Compiled Static libraries
-*.lib
-*.a
-*.la
-*.lai
-*.lo
 
 # Compiled Dynamic libraries
-*.so
-*.so.*
-*.dylib
-*.dll
+
 
 # Executables
-*.exe
 *.out
 *.app
 *.i*86
@@ -119,3 +110,13 @@ RelWithDebInfo
 
 # Infer static analysis output
 infer-out/
+/user/logs
+/user/_build
+
+
+
+!/user/release/
+!/user/release/*/
+!/user/release/*/*/
+!/user/release/*/*/*/
+!/user/release/*/*/*/**

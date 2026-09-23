@@ -1,0 +1,400 @@
+#!/bin/sh
+# Builds libmariadb (MariaDB Connector/C) as a shared library, out-of-tree, for one of
+# mac/ios/android/linux/windows. Mirrors the build-script convention used by the other
+# submodules in this repo (see e.g. ../../../zlib-ng/user/scripts/build-zlib-ng-release.sh):
+# nothing is written back into the submodule's own tree, everything lands under
+# user/release/<platform>/<arch>/<version>/{shared,include}.
+#
+# No source patch is needed: every option this script sets (WITH_UNIT_TESTS, WITH_CURL,
+# WITH_MYSQLCOMPAT, WITH_SSL, ...) is a first-class CMake cache option this project already
+# exposes.
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+ROOT_DIR=$(CDPATH= cd -- "${SCRIPT_DIR}/../.." && pwd)
+USER_DIR="${ROOT_DIR}/user"
+RELEASE_DIR="${USER_DIR}/release"
+BUILD_ROOT="${USER_DIR}/_build"
+STAGE_ROOT="${BUILD_ROOT}/_stage"
+LOG_DIR="${USER_DIR}/logs"
+
+PLATFORM=""
+PLATFORM_SET=0
+CLEAN=1
+VERSION_OVERRIDE=""
+WITH_SSL_MODE="auto"
+
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+LOG_FILE="${LOG_DIR}/build-connector-c-${TIMESTAMP}.log"
+
+mkdir -p "${LOG_DIR}" "${RELEASE_DIR}" "${BUILD_ROOT}" "${STAGE_ROOT}"
+: > "${LOG_FILE}"
+
+log_line() {
+    level="$1"
+    shift
+    line="[${level}] $*"
+    printf '%s\n' "${line}"
+    printf '%s\n' "${line}" >> "${LOG_FILE}"
+}
+
+run_and_log() {
+    log_line INFO "RUN: $*"
+    tmp_log="${LOG_DIR}/.cmd-$$-$(date +%s).log"
+    rc=0
+    "$@" > "${tmp_log}" 2>&1 || rc=$?
+    cat "${tmp_log}" | tee -a "${LOG_FILE}"
+    rm -f "${tmp_log}"
+    [ "${rc}" -eq 0 ] && return 0
+    log_line ERROR "Command failed (exit=${rc}): $*"
+    return "${rc}"
+}
+
+usage() {
+    cat << 'EOF'
+Usage:
+  sh user/scripts/build_connector_c.sh [options]
+
+Options:
+  --platform <mac|ios|android|linux|windows>
+  --clean | --no-clean
+  --version <value>
+  --with-ssl <auto|on|off>   (default: auto)
+  --help
+
+Environment variables:
+  IOS_TOOLCHAIN_FILE        Required for --platform ios
+  IOS_SYSROOT               Optional for iOS (default: iphoneos)
+  ANDROID_NDK_HOME          Required for --platform android
+  ANDROID_PLATFORM          Optional for Android (default: android-24)
+  WINDOWS_TOOLCHAIN_FILE    Required for --platform windows on a non-Windows host
+  LINUX_X64_TOOLCHAIN_FILE  Optional for a Linux x64 cross build
+  LINUX_X64_CC              Optional x86_64 Linux C compiler path/name
+  OPENSSL_ROOT_DIR          Required on linux/mac/ios/android (see --with-ssl below)
+  JOBS                      Optional build parallelism (default: host CPU count)
+
+--with-ssl: MariaDB Connector/C has no "build without TLS" option -- WITH_SSL must resolve
+to OpenSSL, GnuTLS, or (Windows-only) Schannel. This build never falls back to a system-
+installed OpenSSL/GnuTLS package (so the same command behaves the same on Windows, which has
+neither) -- windows uses Schannel (built into the OS, no dependency); linux/mac/ios/android
+require OPENSSL_ROOT_DIR pointing at this repo's own OpenSSL build
+(../../openssl/user/release/<platform>/<arch>/<version>/), i.e. build that submodule first.
+  auto (default): schannel on windows, OPENSSL_ROOT_DIR-based OpenSSL elsewhere
+  on:             force OpenSSL; OPENSSL_ROOT_DIR is required
+  off:            not supported by connector-c's own CMakeLists -- kept only so an explicit
+                  request fails fast with this explanation instead of a raw CMake error
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --platform)
+            [ "$#" -ge 2 ] || { log_line ERROR "Missing value for --platform"; exit 2; }
+            PLATFORM="$2"; PLATFORM_SET=1; shift 2 ;;
+        --clean) CLEAN=1; shift ;;
+        --no-clean) CLEAN=0; shift ;;
+        --version)
+            [ "$#" -ge 2 ] || { log_line ERROR "Missing value for --version"; exit 2; }
+            VERSION_OVERRIDE="$2"; shift 2 ;;
+        --with-ssl)
+            [ "$#" -ge 2 ] || { log_line ERROR "Missing value for --with-ssl"; exit 2; }
+            WITH_SSL_MODE="$2"; shift 2 ;;
+        --help|-h) usage; exit 0 ;;
+        *) log_line ERROR "Unknown argument: $1"; usage; exit 2 ;;
+    esac
+done
+
+case "${WITH_SSL_MODE}" in
+    auto|on|off) ;;
+    *) log_line ERROR "Invalid --with-ssl value: ${WITH_SSL_MODE}"; exit 2 ;;
+esac
+
+if [ "${PLATFORM_SET}" -eq 1 ]; then
+    case "${PLATFORM}" in
+        mac|ios|android|linux|windows) ;;
+        *) log_line ERROR "Invalid --platform value: ${PLATFORM}"; exit 2 ;;
+    esac
+else
+    host_os=$(uname -s)
+    case "${host_os}" in
+        Darwin) PLATFORM="mac" ;;
+        Linux) PLATFORM="linux" ;;
+        MINGW*|MSYS*|CYGWIN*) PLATFORM="windows" ;;
+        *) log_line ERROR "Unsupported host OS: ${host_os}. Use --platform to select a target explicitly."; exit 2 ;;
+    esac
+    log_line INFO "Auto-detected host platform '${PLATFORM}' from '${host_os}'."
+fi
+
+if ! command -v cmake >/dev/null 2>&1; then
+    log_line ERROR "cmake was not found. Install cmake and retry."
+    exit 2
+fi
+
+if [ -n "${VERSION_OVERRIDE}" ]; then
+    VERSION="${VERSION_OVERRIDE}"
+    log_line INFO "Using version override: ${VERSION}"
+else
+    VERSION=$(
+        awk '
+            /CPACK_PACKAGE_VERSION_MAJOR/ { gsub(/[^0-9]/, "", $0); maj=$0 }
+            /CPACK_PACKAGE_VERSION_MINOR/ { gsub(/[^0-9]/, "", $0); min=$0 }
+            /CPACK_PACKAGE_VERSION_PATCH/ { gsub(/[^0-9]/, "", $0); pat=$0 }
+            END { if (maj != "" && min != "" && pat != "") print maj "." min "." pat }
+        ' "${ROOT_DIR}/CMakeLists.txt"
+    )
+    if [ -z "${VERSION}" ]; then
+        VERSION=$(git -C "${ROOT_DIR}" describe --tags --always 2>/dev/null || date +%Y%m%d)
+        log_line FALLBACK "Could not read CPACK_PACKAGE_VERSION_* from CMakeLists.txt. Using ${VERSION}."
+    else
+        log_line INFO "Using repo version: ${VERSION}"
+    fi
+fi
+
+if [ "${CLEAN}" -eq 1 ]; then
+    log_line INFO "Cleaning build/stage roots"
+    rm -rf "${BUILD_ROOT}" "${STAGE_ROOT}"
+    mkdir -p "${BUILD_ROOT}" "${STAGE_ROOT}"
+fi
+
+JOBS_DEFAULT=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+JOBS=${JOBS:-${JOBS_DEFAULT}}
+
+# CMAKE_COMPILE_WARNING_AS_ERROR=OFF: connector-c's own CMakeLists only adds -Werror when
+# this variable is left undefined (see its CMakeLists.txt around WARNING_AS_ERROR) -- setting
+# it, rather than patching source, is its own documented escape hatch. This matters because a
+# newer OpenSSL than connector-c's secure/openssl.c was written against (e.g. this repo's own
+# vendored ../../openssl, which deprecates X509_check_host/X509_check_ip_asc) turns a warning
+# into a hard error otherwise.
+COMMON_DEFS="-DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=OFF -DWITH_UNIT_TESTS=OFF -DWITH_CURL=OFF -DWITH_EXTERNAL_ZLIB=OFF -DWITH_DYNCOL=ON"
+
+ssl_defs_for() {
+    # $1 = platform. Prints CMake defs on stdout; logs/errors to stderr (this is called as
+    # `x=$(ssl_defs_for ...)`, so stdout must carry only the defs). Never touches a system-
+    # installed OpenSSL/GnuTLS -- see usage()'s --with-ssl section for why.
+    platform_name="$1"
+
+    if [ "${WITH_SSL_MODE}" = "off" ]; then
+        log_line ERROR "--with-ssl off is not supported: MariaDB Connector/C's own CMakeLists requires WITH_SSL to resolve to OpenSSL, GnuTLS, or Schannel -- there is no 'no TLS' build." >&2
+        return 1
+    fi
+
+    if [ "${platform_name}" = "windows" ] && [ "${WITH_SSL_MODE}" != "on" ] && [ -z "${OPENSSL_ROOT_DIR:-}" ]; then
+        printf '%s' "-DWITH_SSL=ON"
+        return 0
+    fi
+
+    if [ -z "${OPENSSL_ROOT_DIR:-}" ]; then
+        log_line ERROR "OPENSSL_ROOT_DIR is not set for ${platform_name}. Build the vendored OpenSSL submodule first (submodules/openssl/user/scripts/build_openssl.sh --platform ${platform_name}) and pass its output dir (.../${platform_name}/<arch>/<version>) as OPENSSL_ROOT_DIR." >&2
+        return 1
+    fi
+
+    # OPENSSL_ROOT_DIR alone only helps CMake's FindOpenSSL when the dir has the
+    # lib(64)/+include/ layout it searches for. Our own openssl build script publishes
+    # shared/+include/ instead (see build_openssl.sh), so resolve the exact library/header
+    # paths ourselves and pass them directly -- this also works unmodified if the caller
+    # points OPENSSL_ROOT_DIR at a conventional lib/include install instead.
+    inc_dir="${OPENSSL_ROOT_DIR}/include"
+    lib_dir=""
+    for cand in "${OPENSSL_ROOT_DIR}/shared" "${OPENSSL_ROOT_DIR}/lib" "${OPENSSL_ROOT_DIR}/lib64"; do
+        [ -d "${cand}" ] && { lib_dir="${cand}"; break; }
+    done
+    if [ ! -d "${inc_dir}" ] || [ -z "${lib_dir}" ]; then
+        log_line ERROR "OPENSSL_ROOT_DIR=${OPENSSL_ROOT_DIR} is missing include/ or a shared|lib|lib64 dir. Point it at a build_openssl.sh output dir (.../${platform_name}/<arch>/<version>)." >&2
+        return 1
+    fi
+    crypto_lib=$(find "${lib_dir}" -maxdepth 1 \( -type f -o -type l \) \( -name 'libcrypto.so' -o -name 'libcrypto.dylib' -o -name 'libcrypto.dll.a' -o -name 'libcrypto.lib' \) | head -n 1)
+    ssl_lib=$(find "${lib_dir}" -maxdepth 1 \( -type f -o -type l \) \( -name 'libssl.so' -o -name 'libssl.dylib' -o -name 'libssl.dll.a' -o -name 'libssl.lib' \) | head -n 1)
+    if [ -z "${crypto_lib}" ] || [ -z "${ssl_lib}" ]; then
+        log_line ERROR "Could not find libcrypto/libssl under ${lib_dir}." >&2
+        return 1
+    fi
+    log_line INFO "Using OpenSSL: include=${inc_dir} crypto=${crypto_lib} ssl=${ssl_lib}" >&2
+    printf '%s' "-DWITH_SSL=ON -DOPENSSL_ROOT_DIR=${OPENSSL_ROOT_DIR} -DOPENSSL_INCLUDE_DIR=${inc_dir} -DOPENSSL_CRYPTO_LIBRARY=${crypto_lib} -DOPENSSL_SSL_LIBRARY=${ssl_lib}"
+}
+
+non_windows_defs() {
+    case "$1" in
+        windows) printf '%s' "" ;;
+        *) printf '%s' "-DWITH_MYSQLCOMPAT=OFF -DWITH_DOCS=OFF" ;;
+    esac
+}
+
+rpath_defs_for() {
+    # Makes libmariadb.so/.dylib look for libssl/libcrypto next to itself (same "shared"
+    # dir), instead of requiring callers to set LD_LIBRARY_PATH/DYLD_LIBRARY_PATH -- our own
+    # OpenSSL build has no fixed system install location to fall back to.
+    case "$1" in
+        mac|ios) printf '%s' "-DCMAKE_INSTALL_RPATH=@loader_path" ;;
+        linux|android) printf '%s' "-DCMAKE_INSTALL_RPATH=\$ORIGIN" ;;
+        *) printf '%s' "" ;;
+    esac
+}
+
+collect_artifacts() {
+    build_dir="$1"
+    platform_name="$2"
+    arch_name="$3"
+    all_defs="$4"
+
+    stage_dir="${STAGE_ROOT}/${platform_name}-${arch_name}"
+    rm -rf "${stage_dir}"
+    mkdir -p "${stage_dir}"
+
+    if ! run_and_log cmake --install "${build_dir}" --prefix "${stage_dir}"; then
+        log_line ERROR "cmake --install failed for ${platform_name}/${arch_name}"
+        return 1
+    fi
+
+    out_base="${RELEASE_DIR}/${platform_name}/${arch_name}/${VERSION}"
+    out_shared="${out_base}/shared"
+    out_include="${out_base}/include"
+    mkdir -p "${out_shared}" "${out_include}"
+
+    stage_lib_dir="${stage_dir}/lib"
+    [ -d "${stage_lib_dir}" ] || stage_lib_dir="${stage_dir}/lib64"
+    if [ -d "${stage_lib_dir}" ]; then
+        # -type f -o -type l: the unversioned libmariadb.so is a symlink to libmariadb.so.3;
+        # skipping symlinks would drop the name callers actually link against. cp -P keeps it
+        # a symlink (link + target both land in out_shared, so it still resolves).
+        find "${stage_lib_dir}" \( -type f -o -type l \) \( -name '*.so' -o -name '*.so.*' -o -name '*.dylib' -o -name '*.dll' -o -name '*.dll.a' -o -name '*.lib' \) | while IFS= read -r f; do
+            cp -Pf "${f}" "${out_shared}/"
+        done
+    fi
+    # Windows shared runtime commonly lands next to the binaries dir on some generators.
+    find "${build_dir}" -maxdepth 3 -type f -name '*.dll' 2>/dev/null | while IFS= read -r f; do
+        cp -f "${f}" "${out_shared}/" 2>/dev/null || true
+    done
+
+    if [ -d "${stage_dir}/include" ]; then
+        cp -R "${stage_dir}/include/." "${out_include}/"
+    fi
+
+    {
+        echo "timestamp=${TIMESTAMP}"
+        echo "platform=${platform_name}"
+        echo "arch=${arch_name}"
+        echo "version=${VERSION}"
+        echo "cmake=$(cmake --version | head -n 1)"
+        echo "git_commit=$(git -C "${ROOT_DIR}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+        echo "definitions=${all_defs}"
+        echo "log_file=${LOG_FILE}"
+    } > "${out_base}/build-info.txt"
+
+    log_line INFO "Artifacts saved to ${out_base}"
+}
+
+build_one() {
+    platform_name="$1"
+    arch_name="$2"
+    extra_defs="$3"
+
+    build_dir="${BUILD_ROOT}/${platform_name}/${arch_name}"
+    rm -rf "${build_dir}"
+    mkdir -p "${build_dir}"
+
+    ssl_defs=$(ssl_defs_for "${platform_name}") || return 1
+    defs="${COMMON_DEFS} $(non_windows_defs "${platform_name}") $(rpath_defs_for "${platform_name}") ${ssl_defs} ${extra_defs}"
+
+    log_line INFO "Configuring ${platform_name}/${arch_name}"
+    if ! run_and_log cmake -S "${ROOT_DIR}" -B "${build_dir}" ${defs}; then
+        log_line ERROR "Configure failed for ${platform_name}/${arch_name}."
+        return 1
+    fi
+
+    log_line INFO "Building ${platform_name}/${arch_name} (jobs=${JOBS})"
+    # Build the default "all" target, not just libmariadb: cmake --install below runs every
+    # configured install rule (including the auth/pvio plugins, e.g. dialog.so), so anything
+    # left unbuilt makes the install step fail looking for a missing file.
+    if ! run_and_log cmake --build "${build_dir}" --config Release -j "${JOBS}"; then
+        log_line ERROR "Build failed for ${platform_name}/${arch_name}."
+        return 1
+    fi
+
+    collect_artifacts "${build_dir}" "${platform_name}" "${arch_name}" "${defs}"
+}
+
+build_mac() {
+    log_line INFO "Starting mac/arm64 build"
+    build_one mac arm64 "-DCMAKE_OSX_ARCHITECTURES=arm64"
+}
+
+build_ios() {
+    log_line INFO "Starting ios/arm64 build"
+    if [ -z "${IOS_TOOLCHAIN_FILE:-}" ]; then
+        log_line ERROR "IOS_TOOLCHAIN_FILE is not set. Export IOS_TOOLCHAIN_FILE and retry."
+        return 1
+    fi
+    if [ ! -f "${IOS_TOOLCHAIN_FILE}" ]; then
+        log_line ERROR "IOS_TOOLCHAIN_FILE does not exist: ${IOS_TOOLCHAIN_FILE}"
+        return 1
+    fi
+    ios_sysroot=${IOS_SYSROOT:-iphoneos}
+    build_one ios arm64 "-DCMAKE_TOOLCHAIN_FILE=${IOS_TOOLCHAIN_FILE} -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=${ios_sysroot} -DCMAKE_OSX_ARCHITECTURES=arm64"
+}
+
+build_android() {
+    log_line INFO "Starting android/arm64 build"
+    if [ -z "${ANDROID_NDK_HOME:-}" ]; then
+        log_line ERROR "ANDROID_NDK_HOME is not set. Export ANDROID_NDK_HOME and retry."
+        return 1
+    fi
+    ndk_toolchain="${ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake"
+    if [ ! -f "${ndk_toolchain}" ]; then
+        log_line ERROR "Android toolchain not found: ${ndk_toolchain}"
+        return 1
+    fi
+    android_platform=${ANDROID_PLATFORM:-android-24}
+    build_one android arm64 "-DCMAKE_TOOLCHAIN_FILE=${ndk_toolchain} -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=${android_platform}"
+}
+
+build_linux() {
+    log_line INFO "Starting linux/x64 build"
+    uname_s=$(uname -s)
+    extra=""
+    if [ -n "${LINUX_X64_TOOLCHAIN_FILE:-}" ]; then
+        [ -f "${LINUX_X64_TOOLCHAIN_FILE}" ] || { log_line ERROR "LINUX_X64_TOOLCHAIN_FILE does not exist: ${LINUX_X64_TOOLCHAIN_FILE}"; return 1; }
+        extra="-DCMAKE_TOOLCHAIN_FILE=${LINUX_X64_TOOLCHAIN_FILE}"
+    elif [ -n "${LINUX_X64_CC:-}" ]; then
+        extra="-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_C_COMPILER=${LINUX_X64_CC}"
+    elif [ "${uname_s}" != "Linux" ]; then
+        log_line ERROR "linux/x64 build on non-Linux host needs LINUX_X64_TOOLCHAIN_FILE or LINUX_X64_CC."
+        return 1
+    fi
+    build_one linux x64 "${extra}"
+}
+
+build_windows() {
+    log_line INFO "Starting windows/x64 build"
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*)
+            log_line INFO "Native Windows host detected; using host toolchain directly."
+            build_one windows x64 ""
+            return $?
+            ;;
+    esac
+    if [ -z "${WINDOWS_TOOLCHAIN_FILE:-}" ]; then
+        log_line ERROR "WINDOWS_TOOLCHAIN_FILE is not set (required to cross-compile windows/x64 from a non-Windows host)."
+        return 1
+    fi
+    [ -f "${WINDOWS_TOOLCHAIN_FILE}" ] || { log_line ERROR "WINDOWS_TOOLCHAIN_FILE does not exist: ${WINDOWS_TOOLCHAIN_FILE}"; return 1; }
+    build_one windows x64 "-DCMAKE_TOOLCHAIN_FILE=${WINDOWS_TOOLCHAIN_FILE}"
+}
+
+failures=""
+case "${PLATFORM}" in
+    mac) build_mac || failures="${failures} mac/arm64" ;;
+    ios) build_ios || failures="${failures} ios/arm64" ;;
+    android) build_android || failures="${failures} android/arm64" ;;
+    linux) build_linux || failures="${failures} linux/x64" ;;
+    windows) build_windows || failures="${failures} windows/x64" ;;
+esac
+
+if [ -n "${failures}" ]; then
+    log_line ERROR "Build completed with failures:${failures}"
+    log_line ERROR "See full details in ${LOG_FILE}"
+    exit 1
+fi
+
+log_line INFO "Build completed successfully for: ${PLATFORM}"
+log_line INFO "Release root: ${RELEASE_DIR}"
+log_line INFO "Log file: ${LOG_FILE}"
