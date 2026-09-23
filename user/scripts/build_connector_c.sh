@@ -167,11 +167,29 @@ JOBS=${JOBS:-${JOBS_DEFAULT}}
 # into a hard error otherwise.
 COMMON_DEFS="-DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=OFF -DWITH_UNIT_TESTS=OFF -DWITH_CURL=OFF -DWITH_EXTERNAL_ZLIB=OFF -DWITH_DYNCOL=ON"
 
-ssl_defs_for() {
-    # $1 = platform. Prints CMake defs on stdout; logs/errors to stderr (this is called as
-    # `x=$(ssl_defs_for ...)`, so stdout must carry only the defs). Never touches a system-
-    # installed OpenSSL/GnuTLS -- see usage()'s --with-ssl section for why.
+# Auto-discovers the most recently built submodules/openssl output for $1=platform
+# $2=arch, i.e. the newest mtime dir under ../openssl/user/release/<platform>/<arch>/*/.
+# Prints the path on stdout, or nothing (with exit 1) if openssl hasn't been built for that
+# platform/arch yet. "Latest" is by build time, not by parsing the version string as semver
+# -- version strings here (git describe output, or a submodule's own X.Y.Z) aren't uniformly
+# sortable, but "most recently built" is exactly what a caller who didn't pass an explicit
+# OPENSSL_ROOT_DIR wants.
+auto_discover_openssl_root() {
     platform_name="$1"
+    arch_name="$2"
+    candidates_dir="${ROOT_DIR}/../openssl/user/release/${platform_name}/${arch_name}"
+    [ -d "${candidates_dir}" ] || return 1
+    latest=$(ls -1dt "${candidates_dir}"/*/ 2>/dev/null | head -n 1)
+    [ -n "${latest}" ] || return 1
+    printf '%s' "${latest%/}"
+}
+
+ssl_defs_for() {
+    # $1 = platform, $2 = arch. Prints CMake defs on stdout; logs/errors to stderr (this is
+    # called as `x=$(ssl_defs_for ...)`, so stdout must carry only the defs). Never touches a
+    # system-installed OpenSSL/GnuTLS -- see usage()'s --with-ssl section for why.
+    platform_name="$1"
+    arch_name="$2"
 
     if [ "${WITH_SSL_MODE}" = "off" ]; then
         log_line ERROR "--with-ssl off is not supported: MariaDB Connector/C's own CMakeLists requires WITH_SSL to resolve to OpenSSL, GnuTLS, or Schannel -- there is no 'no TLS' build." >&2
@@ -184,7 +202,15 @@ ssl_defs_for() {
     fi
 
     if [ -z "${OPENSSL_ROOT_DIR:-}" ]; then
-        log_line ERROR "OPENSSL_ROOT_DIR is not set for ${platform_name}. Build the vendored OpenSSL submodule first (submodules/openssl/user/scripts/build_openssl.sh --platform ${platform_name}) and pass its output dir (.../${platform_name}/<arch>/<version>) as OPENSSL_ROOT_DIR." >&2
+        auto_root=$(auto_discover_openssl_root "${platform_name}" "${arch_name}") && [ -n "${auto_root}" ] || auto_root=""
+        if [ -n "${auto_root}" ]; then
+            OPENSSL_ROOT_DIR="${auto_root}"
+            log_line INFO "OPENSSL_ROOT_DIR not set; auto-discovered latest build: ${OPENSSL_ROOT_DIR}" >&2
+        fi
+    fi
+
+    if [ -z "${OPENSSL_ROOT_DIR:-}" ]; then
+        log_line ERROR "OPENSSL_ROOT_DIR is not set for ${platform_name}, and no build was found under ../openssl/user/release/${platform_name}/${arch_name}/. Build the vendored OpenSSL submodule first (submodules/openssl/user/scripts/build_openssl.sh --platform ${platform_name}) or pass an existing output dir (.../${platform_name}/<arch>/<version>) as OPENSSL_ROOT_DIR." >&2
         return 1
     fi
 
@@ -292,7 +318,7 @@ build_one() {
     rm -rf "${build_dir}"
     mkdir -p "${build_dir}"
 
-    ssl_defs=$(ssl_defs_for "${platform_name}") || return 1
+    ssl_defs=$(ssl_defs_for "${platform_name}" "${arch_name}") || return 1
     defs="${COMMON_DEFS} $(non_windows_defs "${platform_name}") $(rpath_defs_for "${platform_name}") ${ssl_defs} ${extra_defs}"
 
     log_line INFO "Configuring ${platform_name}/${arch_name}"

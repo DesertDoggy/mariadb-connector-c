@@ -1,0 +1,8 @@
+timestamp=20260923-101340
+platform=linux
+arch=x64
+version=v3.4.10-7-g99a23bd0
+cmake=cmake version 4.2.3
+git_commit=99a23bd0
+definitions=-DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=OFF -DWITH_UNIT_TESTS=OFF -DWITH_CURL=OFF -DWITH_EXTERNAL_ZLIB=OFF -DWITH_DYNCOL=ON -DWITH_MYSQLCOMPAT=OFF -DWITH_DOCS=OFF -DCMAKE_INSTALL_RPATH=$ORIGIN -DWITH_SSL=ON -DOPENSSL_ROOT_DIR=/home/max/Documents/GitHub/romexplorer/submodules/mariadb-connector-c/../openssl/user/release/linux/x64/4.2.0 -DOPENSSL_INCLUDE_DIR=/home/max/Documents/GitHub/romexplorer/submodules/mariadb-connector-c/../openssl/user/release/linux/x64/4.2.0/include -DOPENSSL_CRYPTO_LIBRARY=/home/max/Documents/GitHub/romexplorer/submodules/mariadb-connector-c/../openssl/user/release/linux/x64/4.2.0/shared/libcrypto.so -DOPENSSL_SSL_LIBRARY=/home/max/Documents/GitHub/romexplorer/submodules/mariadb-connector-c/../openssl/user/release/linux/x64/4.2.0/shared/libssl.so 
+log_file=/home/max/Documents/GitHub/romexplorer/submodules/mariadb-connector-c/user/logs/build-connector-c-20260923-101340.log
