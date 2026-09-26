@@ -1,0 +1,8 @@
+timestamp=20260926-161627
+platform=windows
+arch=x64
+version=8104c4c3
+cmake=cmake version 4.4.2
+git_commit=8104c4c3
+definitions=-DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=OFF -DWITH_UNIT_TESTS=OFF -DWITH_CURL=OFF -DWITH_EXTERNAL_ZLIB=OFF -DWITH_DYNCOL=ON   -DWITH_SSL=ON 
+log_file=/d/Documents/GitHub/romexplorer/submodules/mariadb-connector-c/user/logs/build-connector-c-20260926-161627.log
