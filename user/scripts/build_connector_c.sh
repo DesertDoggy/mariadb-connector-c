@@ -389,12 +389,133 @@ build_linux() {
     build_one linux x64 "${extra}"
 }
 
+# Locates the Visual Studio install root for the native-Windows MSVC build below. Same
+# mechanism as submodules/dolphin/user/scripts/build_dolphin_rvz.sh's find_vs_root() and
+# ../../openssl/user/scripts/build_openssl.sh's copy of it -- duplicated here rather than
+# shared, matching this repo's existing convention of self-contained build scripts (no
+# common/lib file; log_line/run_and_log are duplicated the same way across all of these).
+find_vs_root() {
+    vs_root="${VS_INSTALL_DIR:-C:\\Visual Studio\\18\\Community}"
+
+    if [ ! -f "$(cygpath -u "${vs_root}\\VC\\Auxiliary\\Build\\vcvarsall.bat")" ]; then
+        vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+        if [ -f "${vswhere}" ]; then
+            found_root=$("${vswhere}" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>/dev/null | tr -d '\r')
+            [ -n "${found_root}" ] && vs_root="${found_root}"
+        fi
+    fi
+
+    if [ ! -f "$(cygpath -u "${vs_root}\\VC\\Auxiliary\\Build\\vcvarsall.bat")" ]; then
+        log_line ERROR "Visual Studio install not found. Set VS_INSTALL_DIR to your install root, e.g. VS_INSTALL_DIR='C:\\Visual Studio\\18\\Community'"
+        return 1
+    fi
+
+    printf '%s' "${vs_root}"
+}
+
+# Rewrites any -Dkey=/posix/path token in a defs string to -Dkey=<native Windows path>, e.g.
+# from ssl_defs_for's -DOPENSSL_INCLUDE_DIR=/d/.../include when --with-ssl on/OPENSSL_ROOT_DIR
+# is used on Windows. Needed only for the MSVC batch-file path below: those defs get embedded
+# as literal text in a .bat file run by the VS-bundled (non-MSYS) cmake.exe, which has no
+# concept of MSYS2's /d/... drive-mount notation (unlike a bare argv bash hands an .exe
+# directly, which MSYS2 auto-translates). Non-path tokens (flags, ON/OFF, etc) pass through
+# unchanged.
+winpathify_defs() {
+    result=""
+    for tok in $1; do
+        case "${tok}" in
+            *=/*)
+                key="${tok%%=*}"
+                val="${tok#*=}"
+                val=$(cygpath -w "${val}" 2>/dev/null || printf '%s' "${val}")
+                tok="${key}=${val}"
+                ;;
+        esac
+        result="${result} ${tok}"
+    done
+    printf '%s' "${result# }"
+}
+
+# Configure+build run inside ONE batch file after `call vcvarsall.bat`, same
+# confirmed-by-testing reason as dolphin's build script: bash-exported INCLUDE/LIB/LIBPATH
+# stop reaching link.exe several process-hops down the bash -> cmake.exe -> ninja.exe ->
+# cmd.exe -> link.exe chain. Running cmake as a direct child of the same vcvars-configured
+# cmd.exe avoids that. PATH is reset to a clean, MSYS2-free base before calling vcvarsall.bat
+# so CMake's find_package/find_library machinery can't pick up MinGW-targeted "system"
+# zlib/openssl/etc reachable only via mingw64/bin's pkg-config.exe -- confirmed to actually
+# happen (not just theoretical) when building dolphin/dolphinrvz this same way.
+build_one_windows_msvc() {
+    extra_defs="$1"
+    platform_name="windows"
+    arch_name="x64"
+
+    build_dir="${BUILD_ROOT}/${platform_name}/${arch_name}"
+    wintemp_dir="${BUILD_ROOT}/_wintemp"
+    rm -rf "${build_dir}"
+    mkdir -p "${build_dir}" "${wintemp_dir}"
+
+    ssl_defs=$(ssl_defs_for "${platform_name}" "${arch_name}") || return 1
+    defs="${COMMON_DEFS} $(rpath_defs_for "${platform_name}") ${ssl_defs} ${extra_defs}"
+    defs=$(winpathify_defs "${defs}")
+
+    vs_root=$(find_vs_root) || return 1
+    vcvarsall="${vs_root}\\VC\\Auxiliary\\Build\\vcvarsall.bat"
+    vs_cmake_dir="${vs_root}\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\CMake\\bin"
+    vs_ninja_dir="${vs_root}\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\Ninja"
+    vs_cmake_exe="${vs_cmake_dir}\\cmake.exe"
+    vs_ninja_exe="${vs_ninja_dir}\\ninja.exe"
+    [ -f "$(cygpath -u "${vs_cmake_exe}")" ] || { log_line ERROR "VS-bundled cmake.exe not found: ${vs_cmake_exe} (needs the \"C++ CMake tools for Windows\" component)"; return 1; }
+    [ -f "$(cygpath -u "${vs_ninja_exe}")" ] || { log_line ERROR "VS-bundled ninja.exe not found: ${vs_ninja_exe} (needs the \"C++ CMake tools for Windows\" component)"; return 1; }
+
+    win_root_dir=$(cygpath -w "${ROOT_DIR}")
+    win_build_dir=$(cygpath -w "${build_dir}")
+    win_tmp_dir=$(cygpath -w "${wintemp_dir}")
+
+    log_line INFO "Using MSVC via: ${vcvarsall}"
+    log_line INFO "Configuring ${platform_name}/${arch_name} (MSVC/Ninja)"
+
+    tmp_bat=$(mktemp --suffix=.bat)
+    win_tmp_bat=$(cygpath -w "${tmp_bat}")
+    {
+        echo "@echo off"
+        echo "set \"PATH=C:\\Windows\\System32;C:\\Windows;C:\\Windows\\System32\\Wbem;C:\\Windows\\System32\\WindowsPowerShell\\v1.0;C:\\Windows\\System32\\OpenSSH;${vs_cmake_dir};${vs_ninja_dir}\""
+        # TMP/TEMP overridden to an ordinary disk-backed directory: cl.exe writes scratch
+        # files there during compilation, and this call's own ambient TMP/TEMP -- unlike PATH,
+        # not touched by the reset above -- can be pointed anywhere by the calling environment
+        # (confirmed directly, on ../../openssl's build: a RAM-disk-backed TMP/TEMP reliably
+        # crashed cl.exe's very first invocation of a from-scratch build with "Command line
+        # error D8050: cannot execute '...\c1.dll': failed to get command line into debug
+        # records", gone completely once TMP/TEMP pointed at a normal directory instead).
+        echo "set \"TMP=${win_tmp_dir}\""
+        echo "set \"TEMP=${win_tmp_dir}\""
+        echo "call \"${vcvarsall}\" x64 >nul 2>&1"
+        echo "echo [INFO] Configuring ..."
+        # shellcheck disable=SC2086
+        echo "\"${vs_cmake_exe}\" -S \"${win_root_dir}\" -B \"${win_build_dir}\" -G Ninja -DCMAKE_MAKE_PROGRAM=\"${vs_ninja_exe}\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl ${defs}"
+        echo "if errorlevel 1 exit /b 1"
+        echo "echo [INFO] Building ..."
+        echo "\"${vs_cmake_exe}\" --build \"${win_build_dir}\" --config Release -j${JOBS}"
+    } > "${tmp_bat}"
+
+    rc=0
+    tmp_log="${LOG_DIR}/.cmd-$$-$(date +%s).log"
+    MSYS2_ARG_CONV_EXCL="/c" cmd.exe /c "${win_tmp_bat}" < /dev/null > "${tmp_log}" 2>&1 || rc=$?
+    cat "${tmp_log}" | tee -a "${LOG_FILE}"
+    rm -f "${tmp_log}" "${tmp_bat}"
+    if [ "${rc}" -ne 0 ]; then
+        log_line ERROR "Windows MSVC configure/build failed (exit ${rc})."
+        return "${rc}"
+    fi
+
+    collect_artifacts "${build_dir}" "${platform_name}" "${arch_name}" "${defs}"
+}
+
 build_windows() {
     log_line INFO "Starting windows/x64 build"
     case "$(uname -s)" in
         MINGW*|MSYS*|CYGWIN*)
-            log_line INFO "Native Windows host detected; using host toolchain directly."
-            build_one windows x64 ""
+            log_line INFO "Native Windows host detected; building with MSVC via vcvarsall, matching this repo's dolphin/dolphinrvz build."
+            build_one_windows_msvc ""
             return $?
             ;;
     esac

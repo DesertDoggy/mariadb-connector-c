@@ -29,8 +29,8 @@
 #define MARIADB_PACKAGE_VERSION "3.4.11"
 #define MARIADB_PACKAGE_VERSION_ID 30411
 #define MARIADB_SYSTEM_TYPE "Windows"
-#define MARIADB_MACHINE_TYPE "AMD64"
-#define MARIADB_PLUGINDIR "C:/Program Files (x86)/mariadb-connector-c/lib/mariadb/plugin"
+#define MARIADB_MACHINE_TYPE ""
+#define MARIADB_PLUGINDIR "C:/Program Files/mariadb-connector-c/lib/mariadb/plugin"
 
 /* mysqld compile time options */
 #ifndef MYSQL_CHARSET
@@ -39,6 +39,6 @@
 #endif
 
 /* Source information */
-#define CC_SOURCE_REVISION "8104c4c3aa8791f64b828a96265ecdaf0f888361"
+#define CC_SOURCE_REVISION ""
 
 #endif /* _mariadb_version_h_ */
