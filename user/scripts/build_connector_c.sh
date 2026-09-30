@@ -19,6 +19,7 @@ STAGE_ROOT="${BUILD_ROOT}/_stage"
 LOG_DIR="${USER_DIR}/logs"
 
 PLATFORM=""
+ARCH=""
 PLATFORM_SET=0
 CLEAN=1
 VERSION_OVERRIDE=""
@@ -57,6 +58,7 @@ Usage:
 
 Options:
   --platform <mac|ios|android|linux|windows>
+  --arch <x64|arm64>   linux/windows only (default: the host's); mac/ios/android are arm64
   --clean | --no-clean
   --version <value>
   --with-ssl <auto|on|off>   (default: auto)
@@ -70,6 +72,9 @@ Environment variables:
   WINDOWS_TOOLCHAIN_FILE    Required for --platform windows on a non-Windows host
   LINUX_X64_TOOLCHAIN_FILE  Optional for a Linux x64 cross build
   LINUX_X64_CC              Optional x86_64 Linux C compiler path/name
+  LINUX_ARM64_TOOLCHAIN_FILE Optional for linux/arm64 from a non-arm64 host
+  LINUX_ARM64_CROSS_PREFIX  Otherwise the GNU cross prefix used for it (default:
+                            aarch64-linux-gnu-, apt: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu)
   OPENSSL_ROOT_DIR          Required on linux/mac/ios/android (see --with-ssl below)
   JOBS                      Optional build parallelism (default: host CPU count)
 
@@ -91,6 +96,9 @@ while [ "$#" -gt 0 ]; do
         --platform)
             [ "$#" -ge 2 ] || { log_line ERROR "Missing value for --platform"; exit 2; }
             PLATFORM="$2"; PLATFORM_SET=1; shift 2 ;;
+        --arch)
+            [ "$#" -ge 2 ] || { log_line ERROR "Missing value for --arch"; exit 2; }
+            ARCH="$2"; shift 2 ;;
         --clean) CLEAN=1; shift ;;
         --no-clean) CLEAN=0; shift ;;
         --version)
@@ -124,6 +132,22 @@ else
     esac
     log_line INFO "Auto-detected host platform '${PLATFORM}' from '${host_os}'."
 fi
+
+case "$(uname -m)" in
+    arm64|aarch64) HOST_ARCH="arm64" ;;
+    *) HOST_ARCH="x64" ;;
+esac
+case "${ARCH}" in
+    "") case "${PLATFORM}" in mac|ios|android) ARCH="arm64" ;; *) ARCH="${HOST_ARCH}" ;; esac ;;
+    x64|arm64) ;;
+    aarch64) ARCH="arm64" ;;
+    x86_64|amd64) ARCH="x64" ;;
+    *) log_line ERROR "Invalid --arch value: ${ARCH} (expected x64 or arm64)"; exit 2 ;;
+esac
+case "${PLATFORM}/${ARCH}" in
+    mac/arm64|ios/arm64|android/arm64|linux/x64|linux/arm64|windows/x64|windows/arm64) ;;
+    *) log_line ERROR "Unsupported target ${PLATFORM}/${ARCH}. Supported: mac/arm64 ios/arm64 android/arm64 linux/x64 linux/arm64 windows/x64 windows/arm64"; exit 2 ;;
+esac
 
 if ! command -v cmake >/dev/null 2>&1; then
     log_line ERROR "cmake was not found. Install cmake and retry."
@@ -374,6 +398,7 @@ build_android() {
 }
 
 build_linux() {
+    [ "${ARCH}" = "arm64" ] && { build_linux_arm64; return $?; }
     log_line INFO "Starting linux/x64 build"
     uname_s=$(uname -s)
     extra=""
@@ -387,6 +412,24 @@ build_linux() {
         return 1
     fi
     build_one linux x64 "${extra}"
+}
+
+# linux/arm64: native on an aarch64 Linux host; otherwise a toolchain file, or the GNU
+# aarch64 cross compilers with the find root pointed at their sysroot, so nothing from the
+# x86_64 host's /usr is picked up.
+build_linux_arm64() {
+    log_line INFO "Starting linux/arm64 build"
+    extra=""
+    if [ -n "${LINUX_ARM64_TOOLCHAIN_FILE:-}" ]; then
+        [ -f "${LINUX_ARM64_TOOLCHAIN_FILE}" ] || { log_line ERROR "LINUX_ARM64_TOOLCHAIN_FILE does not exist: ${LINUX_ARM64_TOOLCHAIN_FILE}"; return 1; }
+        extra="-DCMAKE_TOOLCHAIN_FILE=${LINUX_ARM64_TOOLCHAIN_FILE}"
+    elif [ "$(uname -s)" != "Linux" ] || [ "${HOST_ARCH}" != "arm64" ] || [ -n "${LINUX_ARM64_CROSS_PREFIX:-}" ]; then
+        prefix="${LINUX_ARM64_CROSS_PREFIX:-aarch64-linux-gnu-}"
+        command -v "${prefix}gcc" >/dev/null 2>&1 || { log_line ERROR "${prefix}gcc not found. Install gcc-aarch64-linux-gnu (or set LINUX_ARM64_TOOLCHAIN_FILE)."; return 1; }
+        sysroot="/usr/${prefix%-}"
+        extra="-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 -DCMAKE_C_COMPILER=${prefix}gcc -DCMAKE_CXX_COMPILER=${prefix}g++ -DCMAKE_FIND_ROOT_PATH=${sysroot} -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY"
+    fi
+    build_one linux arm64 "${extra}"
 }
 
 # Locates the Visual Studio install root for the native-Windows MSVC build below. Same
@@ -447,7 +490,12 @@ winpathify_defs() {
 build_one_windows_msvc() {
     extra_defs="$1"
     platform_name="windows"
-    arch_name="x64"
+    arch_name="${ARCH}"
+    # arm64 is cross-compiled from an x64 host (x64_arm64) or native on an arm64 one.
+    case "${ARCH}" in
+        x64) vcvars_arch="x64" ;;
+        arm64) if [ "${PROCESSOR_ARCHITECTURE:-}" = "ARM64" ]; then vcvars_arch="arm64"; else vcvars_arch="x64_arm64"; fi ;;
+    esac
 
     build_dir="${BUILD_ROOT}/${platform_name}/${arch_name}"
     wintemp_dir="${BUILD_ROOT}/_wintemp"
@@ -488,7 +536,7 @@ build_one_windows_msvc() {
         # records", gone completely once TMP/TEMP pointed at a normal directory instead).
         echo "set \"TMP=${win_tmp_dir}\""
         echo "set \"TEMP=${win_tmp_dir}\""
-        echo "call \"${vcvarsall}\" x64 >nul 2>&1"
+        echo "call \"${vcvarsall}\" ${vcvars_arch} >nul 2>&1"
         echo "echo [INFO] Configuring ..."
         # shellcheck disable=SC2086
         echo "\"${vs_cmake_exe}\" -S \"${win_root_dir}\" -B \"${win_build_dir}\" -G Ninja -DCMAKE_MAKE_PROGRAM=\"${vs_ninja_exe}\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl ${defs}"
@@ -511,7 +559,7 @@ build_one_windows_msvc() {
 }
 
 build_windows() {
-    log_line INFO "Starting windows/x64 build"
+    log_line INFO "Starting windows/${ARCH} build"
     case "$(uname -s)" in
         MINGW*|MSYS*|CYGWIN*)
             log_line INFO "Native Windows host detected; building with MSVC via vcvarsall, matching this repo's dolphin/dolphinrvz build."
@@ -519,6 +567,10 @@ build_windows() {
             return $?
             ;;
     esac
+    if [ "${ARCH}" = "arm64" ]; then
+        log_line ERROR "windows/arm64 is built with MSVC on a Windows host only; cross-building it is not wired up."
+        return 1
+    fi
     if [ -z "${WINDOWS_TOOLCHAIN_FILE:-}" ]; then
         log_line ERROR "WINDOWS_TOOLCHAIN_FILE is not set (required to cross-compile windows/x64 from a non-Windows host)."
         return 1
@@ -532,8 +584,8 @@ case "${PLATFORM}" in
     mac) build_mac || failures="${failures} mac/arm64" ;;
     ios) build_ios || failures="${failures} ios/arm64" ;;
     android) build_android || failures="${failures} android/arm64" ;;
-    linux) build_linux || failures="${failures} linux/x64" ;;
-    windows) build_windows || failures="${failures} windows/x64" ;;
+    linux) build_linux || failures="${failures} linux/${ARCH}" ;;
+    windows) build_windows || failures="${failures} windows/${ARCH}" ;;
 esac
 
 if [ -n "${failures}" ]; then
@@ -542,6 +594,6 @@ if [ -n "${failures}" ]; then
     exit 1
 fi
 
-log_line INFO "Build completed successfully for: ${PLATFORM}"
+log_line INFO "Build completed successfully for: ${PLATFORM}/${ARCH}"
 log_line INFO "Release root: ${RELEASE_DIR}"
 log_line INFO "Log file: ${LOG_FILE}"
