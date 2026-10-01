@@ -41,11 +41,14 @@ log_line() {
 
 run_and_log() {
     log_line INFO "RUN: $*"
-    tmp_log="${LOG_DIR}/.cmd-$$-$(date +%s).log"
-    rc=0
-    "$@" > "${tmp_log}" 2>&1 || rc=$?
-    cat "${tmp_log}" | tee -a "${LOG_FILE}"
-    rm -f "${tmp_log}"
+    # Streamed, not buffered until the command ends: a twenty-minute build that prints
+    # nothing looks exactly like a hang, and scripts/build_native_deps.sh shows the newest
+    # log line as progress. POSIX sh has no pipefail, so the status crosses the pipe in a file.
+    rc_file="${LOG_DIR}/.rc-$$"
+    rm -f "${rc_file}"
+    { rc=0; "$@" 2>&1 || rc=$?; echo "${rc}" > "${rc_file}"; } | tee -a "${LOG_FILE}"
+    rc=$(cat "${rc_file}" 2>/dev/null || echo 1)
+    rm -f "${rc_file}"
     [ "${rc}" -eq 0 ] && return 0
     log_line ERROR "Command failed (exit=${rc}): $*"
     return "${rc}"
@@ -280,6 +283,19 @@ rpath_defs_for() {
     esac
 }
 
+# mac only: CMake searches /opt/homebrew (and /usr/local) by default, so whichever of
+# zstd/lz4/... the build machine happens to have from Homebrew gets linked by absolute path
+# -- seen as zstd.so -> /opt/homebrew/opt/zstd/lib/libzstd.1.dylib and provider_lz4.so ->
+# .../liblz4.1.dylib. Those plugins then exist or not depending on the machine, and fail to
+# load anywhere else. Ignoring the prefixes makes the build see only the SDK and what this
+# script hands it explicitly (OpenSSL). Tools found through PATH (bison) are unaffected.
+homebrew_isolation_defs_for() {
+    case "$1" in
+        mac) printf '%s' "-DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew;/usr/local" ;;
+        *) printf '%s' "" ;;
+    esac
+}
+
 collect_artifacts() {
     build_dir="$1"
     platform_name="$2"
@@ -343,7 +359,7 @@ build_one() {
     mkdir -p "${build_dir}"
 
     ssl_defs=$(ssl_defs_for "${platform_name}" "${arch_name}") || return 1
-    defs="${COMMON_DEFS} $(non_windows_defs "${platform_name}") $(rpath_defs_for "${platform_name}") ${ssl_defs} ${extra_defs}"
+    defs="${COMMON_DEFS} $(non_windows_defs "${platform_name}") $(rpath_defs_for "${platform_name}") $(homebrew_isolation_defs_for "${platform_name}") ${ssl_defs} ${extra_defs}"
 
     log_line INFO "Configuring ${platform_name}/${arch_name}"
     if ! run_and_log cmake -S "${ROOT_DIR}" -B "${build_dir}" ${defs}; then
