@@ -120,3 +120,4 @@ infer-out/
 !/user/release/*/*/
 !/user/release/*/*/*/
 !/user/release/*/*/*/**
+/user/release
