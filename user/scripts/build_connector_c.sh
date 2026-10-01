@@ -170,7 +170,7 @@ else
         ' "${ROOT_DIR}/CMakeLists.txt"
     )
     if [ -z "${VERSION}" ]; then
-        VERSION=$(git -C "${ROOT_DIR}" describe --tags --always 2>/dev/null || date +%Y%m%d)
+        VERSION=$(git -C "${ROOT_DIR}" describe --tags 2>/dev/null || date +%Y%m%d-%H%M%S)
         log_line FALLBACK "Could not read CPACK_PACKAGE_VERSION_* from CMakeLists.txt. Using ${VERSION}."
     else
         log_line INFO "Using repo version: ${VERSION}"
