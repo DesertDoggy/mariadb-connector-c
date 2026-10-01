@@ -1,8 +1,0 @@
-timestamp=20261001-003547
-platform=windows
-arch=arm64
-version=v3.4.10-10-g5f238aa7
-cmake=cmake version 4.4.2
-git_commit=5f238aa7
-definitions=-DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=OFF -DWITH_UNIT_TESTS=OFF -DWITH_CURL=OFF -DWITH_EXTERNAL_ZLIB=OFF -DWITH_DYNCOL=ON -DWITH_SSL=ON -DOPENSSL_ROOT_DIR=D:\Documents\GitHub\romexplorer\submodules\openssl\user\release\windows\arm64\4.2.0 -DOPENSSL_INCLUDE_DIR=D:\Documents\GitHub\romexplorer\submodules\openssl\user\release\windows\arm64\4.2.0\include -DOPENSSL_CRYPTO_LIBRARY=D:\Documents\GitHub\romexplorer\submodules\openssl\user\release\windows\arm64\4.2.0\shared\libcrypto.lib -DOPENSSL_SSL_LIBRARY=D:\Documents\GitHub\romexplorer\submodules\openssl\user\release\windows\arm64\4.2.0\shared\libssl.lib
-log_file=/d/Documents/GitHub/romexplorer/submodules/mariadb-connector-c/user/logs/build-connector-c-20261001-003547.log

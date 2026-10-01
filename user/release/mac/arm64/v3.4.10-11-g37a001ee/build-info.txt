@@ -1,8 +1,0 @@
-timestamp=20261001-175945
-platform=mac
-arch=arm64
-version=v3.4.10-11-g37a001ee
-cmake=cmake version 4.4.3
-git_commit=37a001ee
-definitions=-DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=OFF -DWITH_UNIT_TESTS=OFF -DWITH_CURL=OFF -DWITH_EXTERNAL_ZLIB=OFF -DWITH_DYNCOL=ON -DWITH_MYSQLCOMPAT=OFF -DWITH_DOCS=OFF -DCMAKE_INSTALL_RPATH=@loader_path -DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew;/usr/local -DWITH_SSL=ON -DOPENSSL_ROOT_DIR=/Users/max/GitHub/romexplorer/submodules/openssl/user/release/mac/arm64/4.2.0 -DOPENSSL_INCLUDE_DIR=/Users/max/GitHub/romexplorer/submodules/openssl/user/release/mac/arm64/4.2.0/include -DOPENSSL_CRYPTO_LIBRARY=/Users/max/GitHub/romexplorer/submodules/openssl/user/release/mac/arm64/4.2.0/shared/libcrypto.dylib -DOPENSSL_SSL_LIBRARY=/Users/max/GitHub/romexplorer/submodules/openssl/user/release/mac/arm64/4.2.0/shared/libssl.dylib -DCMAKE_OSX_ARCHITECTURES=arm64
-log_file=/Users/max/GitHub/romexplorer/submodules/mariadb-connector-c/user/logs/build-connector-c-20261001-175945.log
